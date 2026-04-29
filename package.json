@@ -1,0 +1,27 @@
+{
+  "name": "gitlab-cli",
+  "version": "1.0.0",
+  "description": "CLI for deploying selected branch to GitLab stand",
+  "main": "src/index.js",
+  "bin": {
+    "gitlab-deploy": "src/index.js"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "deploy": "node src/index.js deploy"
+  },
+  "keywords": [
+    "cli",
+    "gitlab",
+    "deploy"
+  ],
+  "author": "",
+  "license": "MIT",
+  "type": "commonjs",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5"
+  }
+}
