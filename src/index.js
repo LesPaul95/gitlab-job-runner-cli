@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 
-const fs = require("node:fs");
-const path = require("node:path");
-const dotenv = require("dotenv");
+import fs from "node:fs";
+import path from "node:path";
+import dotenv from "dotenv";
+import chalk from "chalk";
 
 dotenv.config();
 
@@ -52,13 +53,34 @@ async function main() {
     );
   }
 
-  for (const project of selectedProjects) {
-    await deployProject({
-      project,
-      requestedBranch,
-      defaultBranch: DEFAULT_BRANCH,
-      jobName,
-    });
+  const statusBoard = createStatusBoard(
+    selectedProjects.map((item) => item.name),
+  );
+  statusBoard.render();
+
+  const results = await Promise.allSettled(
+    selectedProjects.map((project) =>
+      deployProject({
+        project,
+        requestedBranch,
+        defaultBranch: DEFAULT_BRANCH,
+        jobName,
+        onStatus: (line) => statusBoard.update(project.name, line),
+      }).catch((error) => {
+        statusBoard.update(
+          project.name,
+          `❌ ${chalk.red.bold(project.name)} - error: ${error.message}`,
+        );
+        throw error;
+      }),
+    ),
+  );
+
+  const failed = results.filter((result) => result.status === "rejected");
+  if (failed.length > 0) {
+    throw new Error(
+      `Failed deployments: ${failed.length} of ${selectedProjects.length}.`,
+    );
   }
 }
 
@@ -67,22 +89,18 @@ async function deployProject({
   requestedBranch,
   defaultBranch,
   jobName,
+  onStatus,
 }) {
   const projectPath = normalizeProjectPath(project.projectPath);
   const encodedProject = encodeURIComponent(projectPath);
-
-  console.log(`\n=== ${project.name} (${projectPath}) ===`);
+  onStatus(`${chalk.blue.bold(project.name)} - preparing deploy`);
 
   const branchExists = await doesBranchExist(encodedProject, requestedBranch);
   const targetBranch = branchExists ? requestedBranch : defaultBranch;
-
-  if (!branchExists) {
-    console.log(
-      `Branch "${requestedBranch}" not found. Fallback to "${defaultBranch}".`,
-    );
-  } else {
-    console.log(`Branch "${requestedBranch}" found.`);
-  }
+  const branchNote = branchExists
+    ? `branch "${requestedBranch}" found`
+    : `branch "${requestedBranch}" not found, fallback "${defaultBranch}"`;
+  onStatus(`${chalk.blue.bold(project.name)} - ${branchNote}`);
 
   const targetSha = await getBranchHeadSha(encodedProject, targetBranch);
   const lastDeployedSha = await getLastSuccessfulJobCommitSha(
@@ -91,20 +109,10 @@ async function deployProject({
   );
 
   if (lastDeployedSha && lastDeployedSha === targetSha) {
-    console.log(
-      `Skip deploy: latest successful "${jobName}" already deployed commit ${targetSha}.`,
+    onStatus(
+      `${getPipelineStatusIcon("success")} ${chalk.green.bold(project.name)} - pipeline up-to-date (${targetSha.slice(0, 8)})`,
     );
     return;
-  }
-
-  if (lastDeployedSha) {
-    console.log(
-      `New deploy needed: target SHA ${targetSha}, last deployed SHA ${lastDeployedSha}.`,
-    );
-  } else {
-    console.log(
-      `No successful "${jobName}" deployments found. Deploying target SHA ${targetSha}.`,
-    );
   }
 
   const { pipelineId, targetJob } = await findPlayableJobInExistingPipelines(
@@ -112,24 +120,22 @@ async function deployProject({
     targetBranch,
     jobName,
   );
-  console.log(
-    `Using existing pipeline: ${pipelineId} (branch: ${targetBranch})`,
+
+  onStatus(
+    `${chalk.blue.bold(project.name)} - using pipeline ${pipelineId} (${targetBranch})`,
   );
 
-  if (targetJob.status !== "manual") {
-    console.log(
-      `Job "${jobName}" status is "${targetJob.status}". Trying to play anyway...`,
-    );
-  }
-
-  const playedJob = await playJob(encodedProject, targetJob.id);
-  console.log(`Triggered job "${jobName}" (job id: ${playedJob.id})`);
+  await playJob(encodedProject, targetJob.id);
 
   const pipelineStatus = await waitForPipelineCompletion(
+    project.name,
     encodedProject,
     pipelineId,
+    onStatus,
   );
-  console.log(`Пайплайн ${pipelineId} завершен. Статус: ${pipelineStatus}`);
+  onStatus(
+    `${getPipelineStatusIcon(pipelineStatus)} ${chalk.blue.bold(project.name)} - pipeline ${pipelineId} status: ${pipelineStatus}`,
+  );
 
   if (pipelineStatus !== "success") {
     throw new Error(
@@ -176,10 +182,7 @@ async function waitForJobs(encodedProject, pipelineId) {
   const delayMs = 2000;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    const response = await gitlabFetch(
-      `/projects/${encodedProject}/pipelines/${pipelineId}/jobs`,
-    );
-    const jobs = await response.json();
+    const jobs = await getAllPipelineJobs(encodedProject, pipelineId, 5);
 
     if (Array.isArray(jobs) && jobs.length > 0) {
       return jobs;
@@ -189,6 +192,29 @@ async function waitForJobs(encodedProject, pipelineId) {
   }
 
   throw new Error(`No jobs found in pipeline ${pipelineId} after waiting.`);
+}
+
+async function getAllPipelineJobs(encodedProject, pipelineId, maxPages = 5) {
+  const allJobs = [];
+
+  for (let page = 1; page <= maxPages; page += 1) {
+    const response = await gitlabFetch(
+      `/projects/${encodedProject}/pipelines/${pipelineId}/jobs?per_page=100&page=${page}`,
+    );
+    const jobs = await response.json();
+
+    if (!Array.isArray(jobs) || jobs.length === 0) {
+      break;
+    }
+
+    allJobs.push(...jobs);
+
+    if (jobs.length < 100) {
+      break;
+    }
+  }
+
+  return allJobs;
 }
 
 async function findPlayableJobInExistingPipelines(
@@ -234,7 +260,12 @@ async function playJob(encodedProject, jobId) {
   return response.json();
 }
 
-async function waitForPipelineCompletion(encodedProject, pipelineId) {
+async function waitForPipelineCompletion(
+  projectName,
+  encodedProject,
+  pipelineId,
+  onStatus,
+) {
   const finalStatuses = new Set([
     "success",
     "failed",
@@ -243,6 +274,7 @@ async function waitForPipelineCompletion(encodedProject, pipelineId) {
     "manual",
   ]);
   const delayMs = 5000;
+  const startedAt = Date.now();
 
   while (true) {
     const response = await gitlabFetch(
@@ -254,9 +286,46 @@ async function waitForPipelineCompletion(encodedProject, pipelineId) {
       return pipeline.status;
     }
 
-    console.log(`Pipeline ${pipelineId} status: ${pipeline.status}... waiting`);
+    const waitedSec = Math.floor((Date.now() - startedAt) / 1000);
+    onStatus(
+      `${getPipelineStatusIcon("running")} ${chalk.blue.bold(projectName)} - pipeline ${pipelineId} status: ${pipeline.status}... waiting (${waitedSec} sec)`,
+    );
     await sleep(delayMs);
   }
+}
+
+function getPipelineStatusIcon(status) {
+  if (status === "success") {
+    return "✅";
+  }
+
+  if (status === "running" || status === "pending") {
+    return "🕑";
+  }
+
+  return "❌";
+}
+
+function createStatusBoard(projectNames) {
+  const lines = new Map();
+  for (const name of projectNames) {
+    lines.set(name, `${name} - queued`);
+  }
+
+  function render() {
+    console.clear();
+    for (const name of projectNames) {
+      console.log(lines.get(name));
+    }
+  }
+
+  return {
+    update(projectName, line) {
+      lines.set(projectName, line);
+      render();
+    },
+    render,
+  };
 }
 
 async function gitlabFetch(path, options = {}) {
