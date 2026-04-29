@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import dotenv from "dotenv";
 import chalk from "chalk";
+import { runLastDeployCommand } from "./commands/last-deploy.js";
 
 dotenv.config();
 
@@ -21,7 +22,7 @@ async function main() {
     process.exit(0);
   }
 
-  if (command !== "deploy") {
+  if (command !== "deploy" && command !== "last-deploy") {
     console.error(`Unknown command: ${command || "<empty>"}`);
     printHelp();
     process.exit(1);
@@ -35,13 +36,24 @@ async function main() {
     throw new Error(`No projects found in ${PROJECTS_FILE}`);
   }
 
+  const jobName = options.job || "to_dev1";
+  const projectFilter = options.project;
+
+  if (command === "last-deploy") {
+    await runLastDeployCommand({
+      projects: PROJECT_LINKS,
+      projectFilter,
+      jobName,
+      normalizeProjectPath,
+      gitlabFetch,
+    });
+    return;
+  }
+
   const requestedBranch = options.branch;
   if (!requestedBranch) {
     throw new Error("Pass branch name: --branch Feature-1");
   }
-
-  const jobName = options.job || "to_dev1";
-  const projectFilter = options.project;
 
   const selectedProjects = projectFilter
     ? PROJECT_LINKS.filter((item) => item.name === projectFilter)
@@ -434,10 +446,11 @@ function printHelp() {
   console.log(`
 Usage:
   gitlab-deploy deploy --branch Feature-1 [--job to_dev1] [--project app1]
+  gitlab-deploy last-deploy [--job to_dev1] [--project app1]
 
 Options:
   --branch   Source branch to deploy
-  --job      Manual job name in GitLab pipeline (default: to_dev1)
+  --job      Job name in GitLab pipeline (default: to_dev1)
   --project  Deploy only one project by name from projects.json
   --help     Show this help
   `);

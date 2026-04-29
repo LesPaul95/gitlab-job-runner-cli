@@ -57,6 +57,18 @@ npx gitlab-deploy deploy --branch Feature-1 --job to_dev1
 npx gitlab-deploy deploy --branch Feature-1 --job to_dev1 --project app1
 ```
 
+Информация по последнему успешному деплою job (ветка, коммит, время):
+
+```bash
+npx gitlab-deploy last-deploy --job to_dev1
+```
+
+Информация по одному проекту:
+
+```bash
+npx gitlab-deploy last-deploy --job to_dev1 --project app1
+```
+
 ## Требования
 
 - Node.js 18+
